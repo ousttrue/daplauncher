@@ -5,7 +5,7 @@ import sys
 import pathlib
 import subprocess
 import asyncio
-from typing import Optional
+from typing import Optional, NamedTuple, Any, Awaitable
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -21,43 +21,57 @@ def get_dap(pred=lambda ex: ex.name.startswith('ms-python')
         return main_js
 
 
-def to_bytes(obj) -> bytes:
-    body = json.dumps(obj).encode('utf-8')
-    with io.BytesIO() as f:
-        f.write(f'Content-Length: {len(body)}\r\n'.encode('ascii'))
-        f.write(b'\r\n')
-        f.write(body)
-        return f.getvalue()
+class Request(NamedTuple):
+    seq: int
+    type: str
+    command: str
+    arguments: Any = None
+
+    def to_bytes(self) -> bytes:
+        body = json.dumps(self._asdict()).encode('utf-8')
+        with io.BytesIO() as f:
+            f.write(f'Content-Length: {len(body)}\r\n'.encode('ascii'))
+            f.write(b'\r\n')
+            f.write(body)
+            return f.getvalue()
+
+    def __str__(self)->str:
+        return f'==>{self.seq}:{self.command}'
+
+class Response(NamedTuple):
+    seq: int
+    type: str
+    request_seq: int
+    success: bool
+    command: str
+    message: Optional[str] = None
+    body: Any = None
+
+    def __str__(self)->str:
+        return f'<=={self.seq}:{self.command}, {self.success}'
 
 
 class DAP:
     def __init__(self) -> None:
         self.next_seq = 1
 
-    def get_initialize_request(self):
+    def create_initialize_request(self) -> Request:
         seq = self.next_seq
         self.next_seq += 1
 
-        obj = {
-            'seq': seq,
-            'type': 'request',
-            'command': 'initialize',
-            'arguments': {
-                'clientName': 'daplauncher.py',
-                'adapterID': 1,
-                'pathFormat': 'path',
-            }
-        }
+        return Request(seq, 'request', 'initialize', {
+            'clientName': 'daplauncher.py',
+            'adapterID': 1,
+            'pathFormat': 'path',
+        })
 
-        return obj
-
-    async def read(self, f):
+    async def read(self, f)->Awaitable[Response]:
         size = 0
         # header
         while True:
             l = await f.readline()
             if not l:
-                print('EOF')
+                print('<==EOF')
                 return None
             if l == b'\r\n':
                 break
@@ -66,13 +80,14 @@ class DAP:
 
         body = await f.read(size)
 
-        return json.loads(body)
+        return Response(**json.loads(body))
 
 
 async def writer(f, dap):
-    request = dap.get_initialize_request()
-    b = to_bytes(request)
-    f.write(b)
+    request = dap.create_initialize_request()
+    print(request)
+    f.write(request.to_bytes())
+    print('==>close')
     f.close()
 
 
