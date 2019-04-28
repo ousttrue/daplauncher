@@ -5,7 +5,7 @@ import sys
 import pathlib
 import subprocess
 import asyncio
-from typing import Optional, NamedTuple, Any, Awaitable
+from typing import Optional, NamedTuple, Any, Awaitable, Dict
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -49,58 +49,88 @@ class Response(NamedTuple):
     body: Any = None
 
     def __str__(self) -> str:
-        return f'==>{self.seq}:{self.command}, {self.success}'
+        return f'==>{self.request_seq}:{self.command}, {self.success}'
+
+
+async def read(dap, r: asyncio.StreamReader) -> Awaitable[Response]:
+    size = 0
+    # header
+    while True:
+        l = await r.readline()
+        if not l:
+            print('==>EOF')
+            return None
+        if l == b'\r\n':
+            break
+        if l.startswith(b'Content-Length:'):
+            size = int(l[15:].strip())
+
+    body = await r.read(size)
+
+    return Response(**json.loads(body))
+
 
 
 class DAP:
-    def __init__(self) -> None:
+    def __init__(self, r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
         self.next_seq = 1
+        self.request_map: Dict[int, Request] = { }
+        self.w = w
 
-    def create_initialize_request(self) -> Request:
+        # schedule infinite StreamReader
+        asyncio.create_task(self._reader(r))
+
+    async def _reader(self, r: asyncio.StreamReader):
+        while True:
+            res = await read(self, r)
+            if not res:
+                break
+            print(res)
+
+            # dispatch response
+            req_fut = self.request_map.get(res.request_seq)
+            if req_fut:
+                req_fut.set_result(res)
+            else:
+                raise RuntimeError(f'request: {res.request_seq} not found')
+
+
+    def _create_initialize_request(self) -> Request:
         seq = self.next_seq
         self.next_seq += 1
 
-        return Request(seq, 'request', 'initialize', {
+        req = Request(seq, 'request', 'initialize', {
             'clientName': 'daplauncher.py',
             'adapterID': 1,
             'pathFormat': 'path',
         })
 
-    async def read(self, f) -> Awaitable[Response]:
-        size = 0
-        # header
-        while True:
-            l = await f.readline()
-            if not l:
-                print('==>EOF')
-                return None
-            if l == b'\r\n':
-                break
-            if l.startswith(b'Content-Length:'):
-                size = int(l[15:].strip())
+        # Create a new Future object.
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        self.request_map[req.seq] = fut
 
-        body = await f.read(size)
+        return req, fut
 
-        return Response(**json.loads(body))
+    def close(self):
+        print('<==close')
+        self.w.close()
 
+    async def initialize(self):
+        req, fut = self._create_initialize_request()
+        print(req)
+        self.w.write(req.to_bytes())
+        res = await fut
 
-async def writer(f, dap):
-    request = dap.create_initialize_request()
-    print(request)
-    f.write(request.to_bytes())
-    print('<==close')
-    f.close()
-
-
-async def reader(f, dap):
-    while True:
-        msg = await dap.read(f)
-        if not msg:
-            break
-        print(msg)
+    async def terminate(self):
+        req, fut = self.create_termnate_request()
+        print(req)
+        self.w.write(req.to_bytes())
+        res = await fut 
 
 
 async def run(cmd, *args):
+    # create process
     print(cmd, *args)
     p = await asyncio.create_subprocess_exec(cmd,
                                              *args,
@@ -109,14 +139,17 @@ async def run(cmd, *args):
                                              stdin=subprocess.PIPE)
     print(p)
 
-    dap = DAP()
+    dap = DAP(p.stdout, p.stdin)
 
-    # schedule tasks
-    asyncio.create_task(writer(p.stdin, dap))
-    asyncio.create_task(reader(p.stdout, dap))
+    # protocol
+    await dap.initialize()
+    #await dap.disconnect()
+
+    dap.close()
 
     # wait until process terminated
-    await p.wait()
+    ret = await p.wait()
+    print(f'terminated: {ret}')
 
 
 def main() -> None:
@@ -124,7 +157,6 @@ def main() -> None:
 
     loop = asyncio.get_event_loop()
     loop.run_until_complete(run('node', str(adapter_path)))
-    print('finished')
 
 
 if __name__ == '__main__':
