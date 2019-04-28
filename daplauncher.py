@@ -60,6 +60,10 @@ def get_go_adapter() -> Optional[pathlib.Path]:
         return 'node', [str(main)]
 
 
+def get_adapter(kind):
+    return globals()[f'get_{kind}_adapter']()
+
+
 class Request(NamedTuple):
     seq: int
     type: str
@@ -131,11 +135,13 @@ async def read(dap, r: asyncio.StreamReader) -> Awaitable[Response]:
 
 
 class DAP:
-    def __init__(self, r: asyncio.StreamReader, w: asyncio.StreamWriter):
+    def __init__(self, r: asyncio.StreamReader, w: asyncio.StreamWriter,
+                 config):
         self.next_seq = 1
         self.request_map: Dict[int, Request] = {}
         self.event_map: Dict[str, Event] = {}
         self.w = w
+        self.config = config
         # schedule infinite StreamReader
         asyncio.create_task(self._reader(r))
 
@@ -170,10 +176,9 @@ class DAP:
         return Request(seq, 'request', command, args)
 
     def _create_initialize_request(self) -> Request:
-        req = self._create_request(
-            'initialize', {
-                'adapterID': 'adapter',
-            })
+        req = self._create_request('initialize', {
+            'pathFormat': 'path',
+        })
         return req
 
     def _create_configuration_done_request(self) -> Request:
@@ -181,12 +186,7 @@ class DAP:
         return req
 
     def _create_launch_request(self) -> Request:
-        req = self._create_request(
-            'launch',
-            {
-                'noDebug': False,
-                'console': 'integratedTerminal',
-            })
+        req = self._create_request('launch', self.config)
         return req
 
     def _create_terminate_request(self) -> Request:
@@ -247,9 +247,10 @@ async def error_reader(r: asyncio.StreamReader):
 
 
 class Launcher:
-    def __init__(self, cmd, *args):
+    def __init__(self, cmd, *args, **kw):
         self.cmd = cmd
         self.args = args
+        self.kw = kw
         self.p = None
 
     async def __aenter__(self):
@@ -265,7 +266,7 @@ class Launcher:
         # scheduled infinite error read
         asyncio.create_task(error_reader(self.p.stderr))
 
-        return DAP(self.p.stdout, self.p.stdin)
+        return DAP(self.p.stdout, self.p.stdin, self.kw)
 
     async def __aexit__(self, exc_type, exc, tb):
         print('<==close')
@@ -275,9 +276,12 @@ class Launcher:
         print(f'terminated: {ret}')
 
 
-async def run(cmd, args) -> None:
+async def debug_session(kw) -> None:
+
+    cmd, args = get_adapter(kw['type'])
+
     # launch
-    async with Launcher(cmd, *args) as dap:
+    async with Launcher(cmd, *args, **kw) as dap:
         # debug session
         await dap.initialize()
         await dap.configuration_done()
@@ -289,7 +293,13 @@ async def run(cmd, args) -> None:
 
 
 if __name__ == '__main__':
-    asyncio.run(run(*get_python_adapter()))
-    #asyncio.run(run(*get_lldb_adapter()))
-    #asyncio.run(run(*get_gdb_adapter()))
-    ##asyncio.run(run(*get_go_adapter()))
+    here = pathlib.Path(__file__).resolve().parent
+
+    python_launch = {
+        'name': 'Python: Current File',
+        'type': 'python',
+        'request': 'launch',
+        'program': str(here / 'sample.py'),
+        'console': 'integratedTerminal'
+    }
+    asyncio.run(debug_session(python_launch))
