@@ -86,7 +86,10 @@ class Response(NamedTuple):
     body: Any = None
 
     def __str__(self) -> str:
-        return f'==>{self.request_seq}: {self.command}, {self.success}'
+        j= ''
+        if self.body:
+            j = json.dumps(self.body, indent=2)
+        return f'==>{self.request_seq}: {self.command}, {self.success}{j}'
 
 
 class Event(NamedTuple):
