@@ -12,7 +12,7 @@ if sys.platform == "win32":
 
 
 def get_dap(pred=lambda ex: ex.name.startswith('ms-python')
-        ) -> Optional[pathlib.Path]:
+            ) -> Optional[pathlib.Path]:
     home = pathlib.Path(os.environ['USERPROFILE'])
     extensions = home / '.vscode/extensions'
     ms_python = next(iter((f for f in extensions.iterdir() if pred(f))))
@@ -36,7 +36,7 @@ class Request(NamedTuple):
             return f.getvalue()
 
     def __str__(self) -> str:
-        return f'<=={self.seq}:{self.command}'
+        return f'<=={self.seq}: {self.command}'
 
 
 class Response(NamedTuple):
@@ -49,7 +49,17 @@ class Response(NamedTuple):
     body: Any = None
 
     def __str__(self) -> str:
-        return f'==>{self.request_seq}:{self.command}, {self.success}'
+        return f'==>{self.request_seq}: {self.command}, {self.success}'
+
+
+class Event(NamedTuple):
+    seq: int
+    type: str
+    event: str
+    body: Any = None
+
+    def __str__(self) -> str:
+        return f'-->E: {self.event}'
 
 
 async def read(dap, r: asyncio.StreamReader) -> Awaitable[Response]:
@@ -69,14 +79,20 @@ async def read(dap, r: asyncio.StreamReader) -> Awaitable[Response]:
 
     obj = json.loads(body)
 
-    return Response(**obj)
-
+    t = obj['type']
+    if t == 'response':
+        return Response(**obj)
+    elif t == 'event':
+        return Event(**obj)
+    else:
+        raise RuntimeError(f'unknown type: {t}')
 
 
 class DAP:
-    def __init__(self, r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+    def __init__(self, r: asyncio.StreamReader,
+                 w: asyncio.StreamWriter) -> None:
         self.next_seq = 1
-        self.request_map: Dict[int, Request] = { }
+        self.request_map: Dict[int, Request] = {}
         self.w = w
 
         # schedule infinite StreamReader
@@ -89,12 +105,13 @@ class DAP:
                 break
             print(res)
 
-            # dispatch response
-            req_fut = self.request_map.get(res.request_seq)
-            if req_fut:
-                req_fut.set_result(res)
-            else:
-                raise RuntimeError(f'request: {res.request_seq} not found')
+            if isinstance(res, Response):
+                # dispatch response
+                req_fut = self.request_map.get(res.request_seq)
+                if req_fut:
+                    req_fut.set_result(res)
+                else:
+                    raise RuntimeError(f'request: {res.request_seq} not found')
 
     def _create_request(self, command, args) -> Request:
         seq = self.next_seq
@@ -106,15 +123,15 @@ class DAP:
             'clientName': 'daplauncher.py',
             'adapterID': 1,
             'pathFormat': 'path',
-            })
+        })
         return req
 
     def _create_disconnect_request(self) -> Request:
-        req =  self._create_request('disconnect', {
+        req = self._create_request('disconnect', {
             'clientName': 'daplauncher.py',
             'adapterID': 1,
             'pathFormat': 'path',
-            })
+        })
         return req
 
     async def _send_request(self, req):
@@ -135,10 +152,10 @@ class DAP:
         self.w.close()
 
     async def initialize(self):
-        return await self._send_request( self._create_initialize_request())
+        return await self._send_request(self._create_initialize_request())
 
     async def disconnect(self):
-        return await self._send_request( self._create_disconnect_request())
+        return await self._send_request(self._create_disconnect_request())
 
     async def terminate(self):
         req, fut = self.create_termnate_request()
@@ -151,10 +168,10 @@ async def run(cmd, *args):
     # create process
     print(cmd, *args)
     p = await asyncio.create_subprocess_exec(cmd,
-            *args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE)
+                                             *args,
+                                             stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE,
+                                             stdin=subprocess.PIPE)
     print(p)
 
     dap = DAP(p.stdout, p.stdin)
@@ -162,8 +179,6 @@ async def run(cmd, *args):
     # protocol
     await dap.initialize()
     await dap.disconnect()
-
-    dap.close()
 
     # wait until process terminated
     ret = await p.wait()
