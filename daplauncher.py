@@ -9,6 +9,8 @@ from typing import Optional, NamedTuple, Any, Awaitable, Dict
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    import signal
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
 def get_extensions_path():
@@ -86,7 +88,7 @@ class Response(NamedTuple):
     body: Any = None
 
     def __str__(self) -> str:
-        j= ''
+        j = ''
         if self.body:
             j = json.dumps(self.body, indent=2)
         return f'==>{self.request_seq}: {self.command}, {self.success}{j}'
@@ -132,6 +134,7 @@ class DAP:
     def __init__(self, r: asyncio.StreamReader, w: asyncio.StreamWriter):
         self.next_seq = 1
         self.request_map: Dict[int, Request] = {}
+        self.event_map: Dict[str, Event] = {}
         self.w = w
         # schedule infinite StreamReader
         asyncio.create_task(self._reader(r))
@@ -141,15 +144,25 @@ class DAP:
             res = await read(self, r)
             if not res:
                 break
-            print(res)
 
+            # dispatch response
             if isinstance(res, Response):
-                # dispatch response
+                print(res)
                 req_fut = self.request_map.get(res.request_seq)
                 if req_fut:
                     req_fut.set_result(res)
                 else:
                     raise RuntimeError(f'request: {res.request_seq} not found')
+            elif isinstance(res, Event):
+                print(res)
+                event_fut = self.event_map.get(res.event)
+                if event_fut:
+                    event_fut.set_result(res)
+                else:
+                    # do nothing
+                    pass
+            else:
+                raise RuntimeError(f'unknown: {res}')
 
     def _create_request(self, command, args) -> Request:
         seq = self.next_seq
@@ -157,11 +170,23 @@ class DAP:
         return Request(seq, 'request', command, args)
 
     def _create_initialize_request(self) -> Request:
-        req = self._create_request('initialize', {
-            'clientName': 'daplauncher.py',
-            'adapterID': 1,
-            'pathFormat': 'path',
-        })
+        req = self._create_request(
+            'initialize', {
+                'adapterID': 'adapter',
+            })
+        return req
+
+    def _create_configuration_done_request(self) -> Request:
+        req = self._create_request('configurationDone', {})
+        return req
+
+    def _create_launch_request(self) -> Request:
+        req = self._create_request(
+            'launch',
+            {
+                'noDebug': False,
+                'console': 'integratedTerminal',
+            })
         return req
 
     def _create_terminate_request(self) -> Request:
@@ -186,13 +211,39 @@ class DAP:
         return res
 
     async def initialize(self):
-        return await self._send_request(self._create_initialize_request())
+        # initialized event
+        #loop = asyncio.get_event_loop()
+        #fut = loop.create_future()
+        #self.event_map['initialized'] = fut
+
+        res = await self._send_request(self._create_initialize_request())
+
+        # wait initialized event
+        #await fut
+
+        return res
+
+    async def configuration_done(self):
+        return await self._send_request(
+            self._create_configuration_done_request())
+
+    async def launch(self):
+        return await self._send_request(self._create_launch_request())
 
     async def terminate(self):
         return await self._send_request(self._create_terminate_request())
 
     async def disconnect(self):
         return await self._send_request(self._create_disconnect_request())
+
+
+async def error_reader(r: asyncio.StreamReader):
+    while True:
+        b = await r.readline()
+        if not b:
+            print('stderr: break')
+            break
+        print(b'stderr:' + b)
 
 
 class Launcher:
@@ -210,6 +261,10 @@ class Launcher:
                                                       stderr=subprocess.PIPE,
                                                       stdin=subprocess.PIPE)
         print(self.p)
+
+        # scheduled infinite error read
+        asyncio.create_task(error_reader(self.p.stderr))
+
         return DAP(self.p.stdout, self.p.stdin)
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -225,12 +280,16 @@ async def run(cmd, args) -> None:
     async with Launcher(cmd, *args) as dap:
         # debug session
         await dap.initialize()
+        await dap.configuration_done()
+
+        await dap.launch()
+
         await dap.terminate()
         await dap.disconnect()
 
 
 if __name__ == '__main__':
     asyncio.run(run(*get_python_adapter()))
-    asyncio.run(run(*get_lldb_adapter()))
-    asyncio.run(run(*get_gdb_adapter()))
-    asyncio.run(run(*get_go_adapter()))
+    #asyncio.run(run(*get_lldb_adapter()))
+    #asyncio.run(run(*get_gdb_adapter()))
+    ##asyncio.run(run(*get_go_adapter()))
