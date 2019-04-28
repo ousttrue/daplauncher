@@ -35,8 +35,9 @@ class Request(NamedTuple):
             f.write(body)
             return f.getvalue()
 
-    def __str__(self)->str:
-        return f'==>{self.seq}:{self.command}'
+    def __str__(self) -> str:
+        return f'<=={self.seq}:{self.command}'
+
 
 class Response(NamedTuple):
     seq: int
@@ -47,8 +48,8 @@ class Response(NamedTuple):
     message: Optional[str] = None
     body: Any = None
 
-    def __str__(self)->str:
-        return f'<=={self.seq}:{self.command}, {self.success}'
+    def __str__(self) -> str:
+        return f'==>{self.seq}:{self.command}, {self.success}'
 
 
 class DAP:
@@ -65,13 +66,13 @@ class DAP:
             'pathFormat': 'path',
         })
 
-    async def read(self, f)->Awaitable[Response]:
+    async def read(self, f) -> Awaitable[Response]:
         size = 0
         # header
         while True:
             l = await f.readline()
             if not l:
-                print('<==EOF')
+                print('==>EOF')
                 return None
             if l == b'\r\n':
                 break
@@ -87,7 +88,7 @@ async def writer(f, dap):
     request = dap.create_initialize_request()
     print(request)
     f.write(request.to_bytes())
-    print('==>close')
+    print('<==close')
     f.close()
 
 
