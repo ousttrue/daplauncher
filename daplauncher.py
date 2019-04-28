@@ -12,7 +12,7 @@ if sys.platform == "win32":
 
 
 def get_dap(pred=lambda ex: ex.name.startswith('ms-python')
-            ) -> Optional[pathlib.Path]:
+        ) -> Optional[pathlib.Path]:
     home = pathlib.Path(os.environ['USERPROFILE'])
     extensions = home / '.vscode/extensions'
     ms_python = next(iter((f for f in extensions.iterdir() if pred(f))))
@@ -67,7 +67,9 @@ async def read(dap, r: asyncio.StreamReader) -> Awaitable[Response]:
 
     body = await r.read(size)
 
-    return Response(**json.loads(body))
+    obj = json.loads(body)
+
+    return Response(**obj)
 
 
 
@@ -94,56 +96,72 @@ class DAP:
             else:
                 raise RuntimeError(f'request: {res.request_seq} not found')
 
-
-    def _create_initialize_request(self) -> Request:
+    def _create_request(self, command, args) -> Request:
         seq = self.next_seq
         self.next_seq += 1
+        return Request(seq, 'request', command, args)
 
-        req = Request(seq, 'request', 'initialize', {
+    def _create_initialize_request(self) -> Request:
+        req = self._create_request('initialize', {
             'clientName': 'daplauncher.py',
             'adapterID': 1,
             'pathFormat': 'path',
-        })
+            })
+        return req
+
+    def _create_disconnect_request(self) -> Request:
+        req =  self._create_request('disconnect', {
+            'clientName': 'daplauncher.py',
+            'adapterID': 1,
+            'pathFormat': 'path',
+            })
+        return req
+
+    async def _send_request(self, req):
+        print(req)
 
         # Create a new Future object.
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self.request_map[req.seq] = fut
 
-        return req, fut
+        self.w.write(req.to_bytes())
+        res = await fut
+
+        return res
 
     def close(self):
         print('<==close')
         self.w.close()
 
     async def initialize(self):
-        req, fut = self._create_initialize_request()
-        print(req)
-        self.w.write(req.to_bytes())
-        res = await fut
+        return await self._send_request( self._create_initialize_request())
+
+    async def disconnect(self):
+        return await self._send_request( self._create_disconnect_request())
 
     async def terminate(self):
         req, fut = self.create_termnate_request()
         print(req)
         self.w.write(req.to_bytes())
-        res = await fut 
+        res = await fut
 
 
 async def run(cmd, *args):
     # create process
     print(cmd, *args)
     p = await asyncio.create_subprocess_exec(cmd,
-                                             *args,
-                                             stdout=subprocess.PIPE,
-                                             stderr=subprocess.PIPE,
-                                             stdin=subprocess.PIPE)
+            *args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE)
     print(p)
 
     dap = DAP(p.stdout, p.stdin)
 
     # protocol
     await dap.initialize()
-    #await dap.disconnect()
+    await dap.disconnect()
 
     dap.close()
 
