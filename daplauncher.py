@@ -11,14 +11,51 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 
-def get_dap(pred=lambda ex: ex.name.startswith('ms-python')
-            ) -> Optional[pathlib.Path]:
+def get_extensions_path():
     home = pathlib.Path(os.environ['USERPROFILE'])
-    extensions = home / '.vscode/extensions'
-    ms_python = next(iter((f for f in extensions.iterdir() if pred(f))))
-    main_js = ms_python / 'out\client\debugger\debugAdapter/main.js'
-    if main_js.exists():
-        return main_js
+    return home / '.vscode/extensions'
+
+
+def get_python_adapter() -> Optional[pathlib.Path]:
+    extensions = get_extensions_path()
+    extension = next(
+        iter((f for f in extensions.iterdir()
+              if f.name.startswith('ms-python.python-'))))
+    main = extension / 'out/client/debugger/debugAdapter/main.js'
+    if main.exists():
+        return 'node', [str(main)]
+
+
+def get_lldb_adapter() -> Optional[pathlib.Path]:
+    extensions = get_extensions_path()
+    extension = next(
+        iter((f for f in extensions.iterdir()
+              if f.name.startswith('webfreak.debug-'))))
+    main = extension / 'out/src/lldb.js'
+
+    if main.exists():
+        return 'node', [str(main)]
+
+
+def get_gdb_adapter() -> Optional[pathlib.Path]:
+    extensions = get_extensions_path()
+    extension = next(
+        iter((f for f in extensions.iterdir()
+              if f.name.startswith('webfreak.debug-'))))
+    main = extension / 'out/src/gdb.js'
+
+    if main.exists():
+        return 'node', [str(main)]
+
+
+def get_go_adapter() -> Optional[pathlib.Path]:
+    extensions = get_extensions_path()
+    extension = next(
+        iter((f for f in extensions.iterdir()
+              if f.name.startswith('ms-vscode.go-'))))
+    main = extension / 'out\src\debugAdapter\goDebug.js'
+    if main.exists():
+        return 'node', [str(main)]
 
 
 class Request(NamedTuple):
@@ -89,12 +126,10 @@ async def read(dap, r: asyncio.StreamReader) -> Awaitable[Response]:
 
 
 class DAP:
-    def __init__(self, r: asyncio.StreamReader,
-                 w: asyncio.StreamWriter) -> None:
+    def __init__(self, r: asyncio.StreamReader, w: asyncio.StreamWriter):
         self.next_seq = 1
         self.request_map: Dict[int, Request] = {}
         self.w = w
-
         # schedule infinite StreamReader
         asyncio.create_task(self._reader(r))
 
@@ -126,12 +161,12 @@ class DAP:
         })
         return req
 
+    def _create_terminate_request(self) -> Request:
+        req = self._create_request('terminate', {})
+        return req
+
     def _create_disconnect_request(self) -> Request:
-        req = self._create_request('disconnect', {
-            'clientName': 'daplauncher.py',
-            'adapterID': 1,
-            'pathFormat': 'path',
-        })
+        req = self._create_request('disconnect', {})
         return req
 
     async def _send_request(self, req):
@@ -147,50 +182,52 @@ class DAP:
 
         return res
 
-    def close(self):
-        print('<==close')
-        self.w.close()
-
     async def initialize(self):
         return await self._send_request(self._create_initialize_request())
+
+    async def terminate(self):
+        return await self._send_request(self._create_terminate_request())
 
     async def disconnect(self):
         return await self._send_request(self._create_disconnect_request())
 
-    async def terminate(self):
-        req, fut = self.create_termnate_request()
-        print(req)
-        self.w.write(req.to_bytes())
-        res = await fut
+
+class Launcher:
+    def __init__(self, cmd, *args):
+        self.cmd = cmd
+        self.args = args
+        self.p = None
+
+    async def __aenter__(self):
+        # create process
+        print(self.cmd, *self.args)
+        self.p = await asyncio.create_subprocess_exec(self.cmd,
+                                                      *self.args,
+                                                      stdout=subprocess.PIPE,
+                                                      stderr=subprocess.PIPE,
+                                                      stdin=subprocess.PIPE)
+        print(self.p)
+        return DAP(self.p.stdout, self.p.stdin)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        print('<==close')
+        self.p.stdin.close()
+        # wait until process terminated
+        ret = await self.p.wait()
+        print(f'terminated: {ret}')
 
 
-async def run(cmd, *args):
-    # create process
-    print(cmd, *args)
-    p = await asyncio.create_subprocess_exec(cmd,
-                                             *args,
-                                             stdout=subprocess.PIPE,
-                                             stderr=subprocess.PIPE,
-                                             stdin=subprocess.PIPE)
-    print(p)
-
-    dap = DAP(p.stdout, p.stdin)
-
-    # protocol
-    await dap.initialize()
-    await dap.disconnect()
-
-    # wait until process terminated
-    ret = await p.wait()
-    print(f'terminated: {ret}')
-
-
-def main() -> None:
-    adapter_path = get_dap()
-
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(run('node', str(adapter_path)))
+async def run(cmd, args) -> None:
+    # launch
+    async with Launcher(cmd, *args) as dap:
+        # debug session
+        await dap.initialize()
+        await dap.terminate()
+        await dap.disconnect()
 
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(run(*get_python_adapter()))
+    asyncio.run(run(*get_lldb_adapter()))
+    asyncio.run(run(*get_gdb_adapter()))
+    asyncio.run(run(*get_go_adapter()))
